@@ -16,6 +16,8 @@ def main():
     parser.add_argument("--debug", help="Enable debug", action="store_true")
     subparsers = parser.add_subparsers(help="sub-command help", dest="command")
 
+    dht_test_subparser = subparsers.add_parser("dhttest")
+
     serve_subparser = subparsers.add_parser(
         "serve", help="Run an HTTP server that serves torrents via an API or directly"
     )
@@ -73,9 +75,31 @@ def main():
                 f.write(torrent_data)
 
             print(f"Downloaded magnet link into file: {filename}")
+    elif args.command == "dhttest":
+        loop = asyncio.get_event_loop()
+        loop.set_debug(True)
+        from magnet2torrent.dht.network import Server
+        server = Server()
+        loop.run_until_complete(server.listen(6881))
+        loop.run_until_complete(server.bootstrap([
+            ('82.221.103.244', 6881),
+            ('67.215.246.10', 6881),
+            ('212.129.33.59', 6881),
+            ('87.98.162.88', 6881),
+            ('174.129.43.152', 6881)
+        ]))
+
+        try:
+            loop.run_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.stop()
+            loop.close()
     else:
         parser.print_help()
 
 
 if __name__ == "__main__":
     main()
+
