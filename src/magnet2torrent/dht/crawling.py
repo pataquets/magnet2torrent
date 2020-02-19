@@ -71,61 +71,38 @@ class SpiderCrawl:
         raise NotImplementedError
 
 
-class ValueSpiderCrawl(SpiderCrawl):
-    def __init__(self, protocol, node, peers, ksize, alpha):
+class PeerSpiderCrawl(SpiderCrawl):
+    def __init__(self, protocol, node, peers, ksize, alpha, queue):
         SpiderCrawl.__init__(self, protocol, node, peers, ksize, alpha)
-        # keep track of the single nearest node without value - per
-        # section 2.3 so we can set the key there if found
-        self.nearest_without_value = NodeHeap(self.node, 1)
+        self.crawl_finished = False
+        self._queue = queue
 
     async def find(self):
         """
         Find either the closest nodes or the value requested.
         """
-        return await self._find(self.protocol.call_find_value)
+        return await self._find(self.protocol.call_get_peers)
 
     async def _nodes_found(self, responses):
         """
         Handle the result of an iteration in _find.
         """
         toremove = []
-        found_values = []
         for peerid, response in responses.items():
             response = RPCFindResponse(response)
             if not response.happened():
                 toremove.append(peerid)
             elif response.has_value():
-                found_values.append(response.get_value())
+                await self._queue.put(response.get_values())
             else:
-                peer = self.nearest.get_node(peerid)
-                self.nearest_without_value.push(peer)
                 self.nearest.push(response.get_node_list())
         self.nearest.remove(toremove)
 
-        if found_values:
-            return await self._handle_found_values(found_values)
         if self.nearest.have_contacted_all():
-            # not found!
-            return None
+            self.crawl_finished = True
+            await self._queue.put([])
+            return
         return await self.find()
-
-    async def _handle_found_values(self, values):
-        """
-        We got some values!  Exciting.  But let's make sure
-        they're all the same or freak out a little bit.  Also,
-        make sure we tell the nearest node that *didn't* have
-        the value to store it.
-        """
-        value_counts = Counter(values)
-        if len(value_counts) != 1:
-            log.warning("Got multiple values for key %i: %s",
-                        self.node.long_id, str(values))
-        value = value_counts.most_common(1)[0][0]
-
-        peer = self.nearest_without_value.popleft()
-        if peer:
-            await self.protocol.call_store(peer, self.node.id, value)
-        return value
 
 
 class NodeSpiderCrawl(SpiderCrawl):
@@ -157,11 +134,6 @@ class RPCFindResponse:
     def __init__(self, response):
         """
         A wrapper for the result of a RPC find.
-
-        Args:
-            response: This will be a tuple of (<response received>, <value>)
-                      where <value> will be a list of tuples if not found or
-                      a dictionary of {'value': v} where v is the value desired
         """
         self.response = response
 
@@ -172,10 +144,14 @@ class RPCFindResponse:
         return self.response[0]
 
     def has_value(self):
-        return isinstance(self.response[1], dict)
+        return b"values" in self.response[1]
 
-    def get_value(self):
-        return self.response[1]['value']
+    def get_values(self):
+        peers = []
+        for value in self.response[1].get(b"values", []):
+            peer_ip, peer_port = struct.unpack("!IH", value)
+            peers.append((IPv4Address(peer_ip), peer_port))
+        return peers
 
     def get_node_list(self):
         """
@@ -184,7 +160,7 @@ class RPCFindResponse:
         """
         response = self.response[1].get(b"nodes")
         nodelist = []
-        while len(response) >= 26:
+        while response and len(response) >= 26:
             peer_id = response[:20]
             peer_ip, peer_port = struct.unpack("!IH", response[20:26])
             node = Node(peer_id, str(IPv4Address(peer_ip)), peer_port)

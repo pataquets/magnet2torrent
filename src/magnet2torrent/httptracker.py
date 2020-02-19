@@ -36,7 +36,7 @@ async def retrieve_peers_http_tracker(task_registry, tracker, infohash):
 
     peer_data = result[b"peers"]
     peers = []
-    while peer_data:
+    while len(peer_data) >= 6:
         peer_ip, peer_port = struct.unpack("!IH", peer_data[:6])
         peers.append((IPv4Address(peer_ip), peer_port))
         peer_data = peer_data[6:]

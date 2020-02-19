@@ -10,7 +10,7 @@ from .protocol import KRPCProtocol
 from .utils import digest
 from .storage import ForgetfulTokenStorage, ForgetfulPeerStorage
 from .node import Node
-from .crawling import ValueSpiderCrawl, NodeSpiderCrawl
+from .crawling import PeerSpiderCrawl, NodeSpiderCrawl
 
 log = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -24,7 +24,7 @@ class Server:
 
     protocol_class = KRPCProtocol
 
-    def __init__(self, ksize=20, alpha=3, node_id=None, peer_storage=None, token_storage=None):
+    def __init__(self, ksize=20, alpha=40, node_id=None, peer_storage=None, token_storage=None, buckets=None):
         """
         Create a server instance.  This will start listening on the given port.
 
@@ -40,6 +40,7 @@ class Server:
         self.peer_storage = peer_storage or ForgetfulPeerStorage()
         self.token_storage = token_storage or ForgetfulTokenStorage()
         self.node = Node(node_id or digest(random.getrandbits(255)))
+        self.buckets = buckets
         self.transport = None
         self.protocol = None
         self.refresh_loop = None
@@ -56,7 +57,7 @@ class Server:
             self.save_state_loop.cancel()
 
     def _create_protocol(self):
-        return self.protocol_class(self.node, self.peer_storage, self.token_storage, self.ksize)
+        return self.protocol_class(self.node, self.peer_storage, self.token_storage, self.ksize, buckets=self.buckets)
 
     async def listen(self, port, interface='0.0.0.0'):
         """
@@ -133,64 +134,30 @@ class Server:
         result = await self.protocol.ping(addr, {b"id": self.node.id})
         return Node(result[1][b"id"], addr[0], addr[1]) if result[0] else None
 
-    # async def get(self, key):
-    #     """
-    #     Get a key if the network has it.
+    def find_peers(self, task_registry, info_hash):
+        log.info("Looking for peers for %s", info_hash)
+        node = Node(info_hash)
+        nearest = self.protocol.router.find_neighbors(node)
+        if not nearest:
+            log.info("There are no known neighbors to get key %s", info_hash)
+            future = asyncio.Future()
+            future.set_result(('dht://', {"seeders": 0, "leechers": 0, "peers": []}))
+            return future
 
-    #     Returns:
-    #         :class:`None` if not found, the value otherwise.
-    #     """
-    #     log.info("Looking up key %s", key)
-    #     dkey = digest(key)
-    #     # if this node has it, return it
-    #     if self.storage.get(dkey) is not None:
-    #         return self.storage.get(dkey)
-    #     node = Node(dkey)
-    #     nearest = self.protocol.router.find_neighbors(node)
-    #     if not nearest:
-    #         log.warning("There are no known neighbors to get key %s", key)
-    #         return None
-    #     spider = ValueSpiderCrawl(self.protocol, node, nearest,
-    #                               self.ksize, self.alpha)
-    #     return await spider.find()
+        spider_queue = asyncio.Queue()
+        spider = PeerSpiderCrawl(self.protocol, node, nearest, self.ksize, self.alpha, spider_queue)
+        task = asyncio.create_task(spider.find())
 
-    # async def set(self, key, value):
-    #     """
-    #     Set the given string key to the given value in the network.
-    #     """
-    #     if not check_dht_value_type(value):
-    #         raise TypeError(
-    #             "Value must be of type int, float, bool, str, or bytes"
-    #         )
-    #     log.info("setting '%s' = '%s' on network", key, value)
-    #     dkey = digest(key)
-    #     return await self.set_digest(dkey, value)
+        result_queue = asyncio.Queue()
+        async def found_peers():
+            while not spider.crawl_finished:
+                peers = await spider_queue.get()
+                await result_queue.put(('dht://', {"seeders": 0, "leechers": 0, "peers": peers}, result_queue.get()))
 
-    # async def set_digest(self, dkey, value):
-    #     """
-    #     Set the given SHA1 digest key (bytes) to the given value in the
-    #     network.
-    #     """
-    #     node = Node(dkey)
+            await result_queue.put(('dht://', {"seeders": 0, "leechers": 0, "peers": []}))
 
-    #     nearest = self.protocol.router.find_neighbors(node)
-    #     if not nearest:
-    #         log.warning("There are no known neighbors to set key %s",
-    #                     dkey.hex())
-    #         return False
-
-    #     spider = NodeSpiderCrawl(self.protocol, node, nearest,
-    #                              self.ksize, self.alpha)
-    #     nodes = await spider.find()
-    #     log.info("setting '%s' on %s", dkey.hex(), list(map(str, nodes)))
-
-    #     # if this node is close too, then store here as well
-    #     biggest = max([n.distance_to(node) for n in nodes])
-    #     if self.node.distance_to(node) < biggest:
-    #         self.storage[dkey] = value
-    #     results = [self.protocol.call_store(n, dkey, value) for n in nodes]
-    #     # return true only if at least one store call succeeded
-    #     return any(await asyncio.gather(*results))
+        asyncio.create_task(found_peers())
+        return result_queue.get()
 
     def save_state(self, fname):
         """
@@ -202,11 +169,8 @@ class Server:
             'ksize': self.ksize,
             'alpha': self.alpha,
             'id': self.node.id,
-            'neighbors': self.bootstrappable_neighbors()
+            'buckets': self.protocol.router.buckets,
         }
-        if not data['neighbors']:
-            log.warning("No known neighbors, so not writing to cache.")
-            return
         with open(fname, 'wb') as file:
             pickle.dump(data, file)
 
@@ -219,9 +183,7 @@ class Server:
         log.info("Loading state from %s", fname)
         with open(fname, 'rb') as file:
             data = pickle.load(file)
-        svr = Server(data['ksize'], data['alpha'], data['id'])
-        if data['neighbors']:
-            svr.bootstrap(data['neighbors'])
+        svr = Server(data['ksize'], data['alpha'], data['id'], buckets=data['buckets'])
         return svr
 
     def save_state_regularly(self, fname, frequency=600):

@@ -21,8 +21,8 @@ log = logging.getLogger(__name__)  # pylint: disable=invalid-name
 # Has same license as kademlia, see __init__.py
 
 class KRPCProtocol(asyncio.DatagramProtocol):
-    def __init__(self, source_node, peer_storage, token_storage, ksize, wait_timeout=5):
-        self.router = RoutingTable(self, ksize, source_node)
+    def __init__(self, source_node, peer_storage, token_storage, ksize, wait_timeout=5, buckets=None):
+        self.router = RoutingTable(self, ksize, source_node, buckets=buckets)
         self.peer_storage = peer_storage
         self.token_storage = token_storage
         self.source_node = source_node
@@ -37,8 +37,8 @@ class KRPCProtocol(asyncio.DatagramProtocol):
         log.debug("received datagram from %s", addr)
         try:
             data = bdecode(data)
-        except BTFailure:
-            log.exception("Failed to decode message")
+        except (BTFailure, ValueError):
+            log.info("Failed to decode message")
             return
 
         if not isinstance(data, dict):
@@ -65,7 +65,7 @@ class KRPCProtocol(asyncio.DatagramProtocol):
         func = getattr(self, f"rpc_{func_name.decode('utf-8')}", None)
         if func is None or not callable(func):
             msgargs = (self.__class__.__name__, func_name)
-            log.warning("%s has no callable method "
+            log.info("%s has no callable method "
                         "rpc_%s; ignoring request", *msgargs)
             return
 
@@ -84,7 +84,7 @@ class KRPCProtocol(asyncio.DatagramProtocol):
     async def handle_response(self, transaction_id, args, addr):
         msgargs = (b64encode(transaction_id), addr)
         if transaction_id not in self._outstanding:
-            log.warning("received unknown message %s "
+            log.info("received unknown message %s "
                         "from %s; ignoring", *msgargs)
             return
         log.debug("received response %s for message "
@@ -96,7 +96,7 @@ class KRPCProtocol(asyncio.DatagramProtocol):
 
     def _timeout(self, transaction_id):
         args = (b64encode(transaction_id), self._wait_timeout)
-        log.error("Did not received reply for msg "
+        log.info("Did not received reply for msg "
                   "id %s within %i seconds", *args)
         self._outstanding[transaction_id][0].set_result((False, None))
         del self._outstanding[transaction_id]
@@ -144,7 +144,7 @@ class KRPCProtocol(asyncio.DatagramProtocol):
             data[b"token"] = token
         return data
 
-    def rpc_get_peers(self, sender, id, info_hash, want="n4", noseed=0, scrape=0):
+    def rpc_get_peers(self, sender, id, info_hash, want="n4", noseed=0, scrape=0, bs=None):
         source = Node(id, sender[0], sender[1])
         self.welcome_if_new(source)
         peers = self.peer_storage.get_peers(info_hash)
@@ -165,15 +165,8 @@ class KRPCProtocol(asyncio.DatagramProtocol):
 
     async def call_get_peers(self, node_to_ask, node_to_find):
         address = (node_to_ask.ip, node_to_ask.port)
-        result = await self.get_peers(address, self.source_node.id,
-                                      node_to_find.id)
+        result = await self.get_peers(address, {b"id": self.source_node.id, b"info_hash": node_to_find.id})
         return self.handle_call_response(result, node_to_ask)
-
-    # async def call_find_value(self, node_to_ask, node_to_find):
-    #     address = (node_to_ask.ip, node_to_ask.port)
-    #     result = await self.find_value(address, self.source_node.id,
-    #                                    node_to_find.id)
-    #     return self.handle_call_response(result, node_to_ask)
 
     async def call_ping(self, node_to_ask):
         address = (node_to_ask.ip, node_to_ask.port)
@@ -221,7 +214,7 @@ class KRPCProtocol(asyncio.DatagramProtocol):
         we get no response, make sure it's removed from the routing table.
         """
         if not result[0]:
-            log.warning("no response from %s, removing from router", node)
+            log.info("no response from %s, removing from router", node)
             self.router.remove_contact(node)
             return result
 
