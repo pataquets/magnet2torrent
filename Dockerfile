@@ -10,4 +10,4 @@ RUN pip install --no-cache-dir -r ./requirements.txt
 COPY . /usr/src/app/
 RUN python ./setup.py install
 
-ENTRYPOINT [ "magnet2torrent" ]
+#ENTRYPOINT [ "magnet2torrent" ]

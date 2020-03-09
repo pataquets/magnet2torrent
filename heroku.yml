@@ -3,4 +3,4 @@ build:
     web: Dockerfile
 
 run:
-  web: serve --port $PORT
+  web: magnet2torrent serve --port $PORT
