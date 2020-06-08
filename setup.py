@@ -8,7 +8,7 @@ def readme():
 
 setup(
     name="magnet2torrent",
-    version="1.0.4",
+    version="1.1.0",
     url="https://github.com/JohnDoee/magnet2torrent",
     author="Anders Jensen",
     author_email="johndoee@tridentstream.org",
@@ -19,7 +19,7 @@ setup(
     packages=find_packages("src"),
     package_dir={"":"src"},
     include_package_data=True,
-    install_requires=["aiohttp==3.6.*", "six>=1.13.0", ],
+    install_requires=["aiohttp==3.6.*", "six>=1.13.0", "expiringdict>=1.2.0"],
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Environment :: Web Environment",

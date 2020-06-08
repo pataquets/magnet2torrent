@@ -11,6 +11,10 @@ from .utils import bytes_to_bit_string, shared_prefix
 log = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 
+class FailedToFindBucketException(Exception):
+    """Failed to find a bucket for a given node-id, should not happen"""
+
+
 class KBucket:
     def __init__(self, rangeLower, rangeUpper, ksize):
         self.range = (rangeLower, rangeUpper)
@@ -70,6 +74,8 @@ class KBucket:
             if node.id in self.replacement_nodes:
                 del self.replacement_nodes[node.id]
             self.replacement_nodes[node.id] = node
+            while len(self.replacement_nodes) > self.ksize * 2:
+                self.replacement_nodes.popitem(last=False)
             return False
         return True
 
@@ -180,10 +186,9 @@ class RoutingTable:
         Get the index of the bucket that the given node would fall into.
         """
         for index, bucket in enumerate(self.buckets):
-            if node.long_id < bucket.range[1]:
+            if node.long_id <= bucket.range[1]:
                 return index
-        # we should never be here, but make linter happy
-        return None
+        raise FailedToFindBucketException(f"Failed to find bucket for {node.long_id!r}")
 
     def find_neighbors(self, node, k=None, exclude=None):
         k = k or self.ksize
